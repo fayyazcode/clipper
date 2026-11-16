@@ -2,6 +2,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -9,6 +10,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parent
@@ -21,6 +23,11 @@ LIMIT = 2 * 1024**3
 
 
 def run(args, folder):
+    if args[0] in {"ffmpeg", "ffprobe"}:
+        executable = shutil.which(args[0])
+        if executable is None:
+            raise RuntimeError(f"{args[0]} is missing. Install FFmpeg and reopen PowerShell.")
+        args = [executable, *args[1:]]
     result = subprocess.run(args, cwd=folder, capture_output=True, text=True,
                             encoding="utf-8", errors="replace")
     if result.returncode:
@@ -89,16 +96,39 @@ def update(job_id, **changes):
         JOBS[job_id].update(changes)
 
 
+def download_youtube(link, folder, preview):
+    if preview:
+        formats = (
+            "b[height<=360][vcodec^=avc1][acodec^=mp4a]"
+            "/bv*[height<=360][vcodec^=avc1]+ba[ext=m4a]"
+            "/b[height<=480][ext=mp4]/bv*[height<=480]+ba/b[height<=480]"
+        )
+        filename = "source"
+    else:
+        formats = (
+            "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]"
+            "/b[height<=1080][ext=mp4]/bv*[height<=1080]+ba/b[height<=1080]"
+        )
+        filename = "export-source"
+
+    with TemporaryDirectory(dir=folder) as temp:
+        download_folder = Path(temp)
+        run([sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist",
+             "--max-filesize", "2G", "-f", formats, "--merge-output-format", "mp4",
+             "--remux-video", "mp4", "-o", "video.%(ext)s", link], download_folder)
+        video = download_folder / "video.mp4"
+        if not video.is_file():
+            raise RuntimeError("YouTube import produced no MP4. Try uploading a local copy.")
+        video.replace(folder / f"{filename}.mp4")
+
+
 def analyze(job_id, link):
     global MODEL
     folder = DATA / job_id
     try:
         if link:
-            update(job_id, status="Importing YouTube video")
-            run([sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist", "--max-filesize", "2G",
-                 "-f", "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080][ext=mp4]/bv*[height<=1080]+ba/b[height<=1080]",
-                 "--merge-output-format", "mp4", "--remux-video", "mp4",
-                 "-o", "source.%(ext)s", link], folder)
+            update(job_id, status="Downloading a lightweight preview")
+            download_youtube(link, folder, preview=True)
         info = json.loads(run(["ffprobe", "-v", "error", "-show_streams",
                                "-show_format", "-of", "json", "source.mp4"], folder))
         kinds = {stream["codec_type"] for stream in info["streams"]}
@@ -136,8 +166,19 @@ def stamp(seconds):
 def render(job_id, export_id, start, end, layout, captions):
     folder = DATA / job_id
     with LOCK:
-        export = JOBS[job_id]["exports"][export_id]
+        job = JOBS[job_id]
+        export = job["exports"][export_id]
+        link = job["link"]
     try:
+        source = "source.mp4"
+        if link:
+            source = "export-source.mp4"
+            if not (folder / source).is_file():
+                with LOCK:
+                    export.update(status="Downloading high-quality source")
+                download_youtube(link, folder, preview=False)
+        with LOCK:
+            export.update(status="Rendering")
         if layout == "crop":
             video_filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
         else:
@@ -154,7 +195,7 @@ def render(job_id, export_id, start, end, layout, captions):
             (folder / subtitle).write_text("\n\n".join(cues) + "\n", encoding="utf-8")
             video_filter += f",subtitles={subtitle}:force_style='FontSize=14,Outline=2,MarginV=36'"
         output = export_id + ".mp4"
-        run(["ffmpeg", "-nostdin", "-v", "error", "-ss", str(start), "-i", "source.mp4",
+        run(["ffmpeg", "-nostdin", "-v", "error", "-ss", str(start), "-i", source,
              "-t", str(end-start), "-vf", video_filter, "-map", "0:v:0", "-map", "0:a:0",
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", output], folder)
@@ -281,10 +322,17 @@ class Handler(BaseHTTPRequestHandler):
                         folder.rmdir()
                         raise
                 with LOCK:
-                    JOBS[job_id] = {"status": "Queued", "exports": {},
-                                    "source": f"/media/{job_id}/source.mp4"}
-                WORKER.submit(analyze, job_id, link)
-                self.reply({"id": job_id}, 202)
+                    existing = next((key for key, job in JOBS.items()
+                                     if link and job["link"] == link and job["status"] != "error"
+                                     and (DATA / key).is_dir()), None)
+                    if not existing:
+                        JOBS[job_id] = {"status": "Queued", "exports": {}, "link": link,
+                                        "source": f"/media/{job_id}/source.mp4"}
+                if existing:
+                    folder.rmdir()
+                else:
+                    WORKER.submit(analyze, job_id, link)
+                self.reply({"id": existing or job_id}, 202)
                 return
             match = re.fullmatch(r"/jobs/([a-f0-9]{32})/export", self.path)
             if match:

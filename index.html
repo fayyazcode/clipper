@@ -190,6 +190,7 @@ $("export").onclick = async () => {
         $("download").hidden = $("preview").hidden = false;
         break;
       }
+      $("exportStatus").textContent = output.status + "…";
       await delay();
     }
   } catch (error) {

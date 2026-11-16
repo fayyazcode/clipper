@@ -18,6 +18,8 @@ Upload an MP4 or paste a YouTube video URL for footage you have permission to re
 
 ## Editing
 
+YouTube imports use a smaller preview (360p when available, up to 480p). The first export downloads a separate source up to 1080p and keeps it for subsequent exports from that job. Reopening the same YouTube link while the app is running reuses its preview and transcript. MP4 uploads export directly from the uploaded file.
+
 The app ranks transcript ranges using opening cues, sentence endings, and speech density. It suggests up to five distinct excerpts, usually 20–60 seconds. Review them in the source preview, adjust start and end times, and edit the caption text if needed. Choose **Fit entire frame** for wide shots or **Center crop** for footage with a centered subject. Export to review and download a captioned 1080 × 1920 H.264/AAC MP4.
 
 Suggestions use speech, so silent footage needs a different workflow. The framing is fixed for each export. Jobs are kept in memory while the app is running. The source files and exports remain in the `jobs` folder after you close the app. Delete old job folders when the app is stopped to recover disk space.
