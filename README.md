@@ -4,7 +4,7 @@ A local web app for finding speech-based highlights and exporting vertical Short
 
 ## Windows setup
 
-Install Python 3.11 or 3.12, FFmpeg with subtitle and libx264 support, and Deno for YouTube imports. Make sure `py`, `ffmpeg`, `ffprobe`, and `deno` are on PATH. Open PowerShell in the unzipped project folder and run:
+Install Python 3.11 or 3.12, FFmpeg with subtitle and libx264 support, and Deno for YouTube imports. Make sure `py`, `ffmpeg`, `ffprobe`, and `deno` are on PATH. Open PowerShell in the project folder and run:
 
 ```powershell
 py -3.12 -m venv .venv

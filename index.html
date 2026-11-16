@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube Clipper</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui;color:#f5f3fa;background:#14131a}
+body{max-width:1050px;margin:auto;padding:clamp(20px,5vw,55px)}
+h1{font-size:clamp(36px,7vw,62px);letter-spacing:-.065em;margin:0}
+h2{font-size:20px;margin:0 0 16px}
+p{color:#c5bed0} section,aside{background:#201e29;border:1px solid #40394d;border-radius:16px;padding:20px;margin:20px 0}
+form,.row{display:flex;flex-wrap:wrap;align-items:end;gap:12px;margin:14px 0}
+input,select,textarea,button{font:inherit;border:1px solid #615771;border-radius:8px;padding:10px;color:inherit;background:#17151e;box-sizing:border-box}
+input[type=url]{min-width:min(100%,250px);flex:1}input[type=file]{max-width:100%}
+button{cursor:pointer;background:#dacaFF;color:#1f1039;font-weight:700}button:disabled{opacity:.55;cursor:wait}
+button.pick{background:#2e273a;color:#f5f3fa;text-align:left;width:100%;margin-bottom:8px}
+button[aria-pressed=true]{border-color:#dacaFF;background:#413155}
+.editor{display:grid;grid-template-columns:minmax(230px,1fr) minmax(0,2fr);gap:18px}
+video{width:100%;max-height:480px;background:#100f15}label{display:grid;gap:7px}
+input[type=number]{width:105px}textarea{width:100%;resize:vertical}a{color:#e0ceff}
+.cue{display:grid;grid-template-columns:110px 1fr;gap:10px;margin:8px 0;align-items:center}
+#preview{max-width:300px;display:block;margin-top:15px} [hidden]{display:none!important}
+@media(max-width:680px){.editor{grid-template-columns:1fr}.cue{grid-template-columns:1fr}}
+</style>
+<h1>YouTube Clipper</h1>
+<p>Find highlights in a video, then cut and caption them for Shorts.</p>
+<section>
+<h2>Source video</h2>
+<form id="link">
+  <input name="url" type="url" required aria-label="YouTube video link" placeholder="https://www.youtube.com/watch?v=…">
+  <button>Import YouTube video</button>
+</form>
+<form id="upload">
+  <input name="video" type="file" accept=".mp4,video/mp4" required aria-label="MP4 video">
+  <button>Upload MP4</button>
+</form>
+<p role="status" id="status"></p>
+</section>
+<div class="editor" id="editor" hidden>
+<aside><h2>Suggested clips</h2><div id="clips"></div></aside>
+<section>
+<h2>Review and export</h2>
+<video id="source" controls playsinline preload="metadata"></video>
+<div class="row">
+  <label>Start (s)<input id="start" type="number" step=".001" min="0"></label>
+  <label>End (s)<input id="end" type="number" step=".001" min="0"></label>
+  <button id="play" type="button">Play selection</button>
+</div>
+<details open><summary>Caption text</summary><div id="captions"></div></details>
+<div class="row">
+  <label>Vertical framing<select id="layout"><option value="pad">Fit entire frame</option><option value="crop">Center crop</option></select></label>
+  <button id="export">Export 1080 × 1920</button>
+</div>
+<p role="status" id="exportStatus"></p>
+<a id="download" hidden>Download MP4</a>
+<video id="preview" controls playsinline hidden></video>
+</section>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let job, jobId, playEnd = null, edits = new Map();
+const delay = () => new Promise(resolve => setTimeout(resolve, 1000));
+const time = seconds => Number(seconds).toFixed(2) + "s";
+async function api(path, body, type = "application/json") {
+  const response = await fetch(path, body === undefined ? {} : {
+    method:"POST", headers:{"Content-Type":type},
+    body:type === "application/json" ? JSON.stringify(body) : body
+  });
+  const data = await response.json();
+  if (!response.ok) throw Error(data.error);
+  return data;
+}
+function bounds() {
+  const start = $("start").valueAsNumber, end = $("end").valueAsNumber;
+  if (!(start >= 0 && end <= job.duration + 0.0005 && end - start >= 1 && end - start <= 90))
+    throw Error("Choose a clip between 1 and 90 seconds within the video.");
+  return {start, end:Math.min(end,job.duration)};
+}
+function activeCues() {
+  return job.segments.map((cue,index) => ({...cue,index})).filter(cue =>
+    cue.end > $("start").valueAsNumber && cue.start < $("end").valueAsNumber);
+}
+function showCues() {
+  $("captions").replaceChildren();
+  for (const cue of activeCues()) {
+    const label = document.createElement("label");
+    label.className = "cue";
+    label.append(time(cue.start));
+    const input = document.createElement("textarea");
+    input.rows = 2;
+    input.value = edits.get(cue.index) ?? cue.text;
+    input.addEventListener("input", () => edits.set(cue.index,input.value));
+    label.append(input);
+    $("captions").append(label);
+  }
+}
+function pick(clip, button) {
+  playEnd = null;
+  $("source").pause();
+  $("start").value = clip.start.toFixed(3);
+  $("end").value = clip.end.toFixed(3);
+  $("source").currentTime = clip.start;
+  document.querySelectorAll(".pick").forEach(item => item.setAttribute("aria-pressed", item === button));
+  showCues();
+}
+function showJob() {
+  edits = new Map();
+  $("editor").hidden = false;
+  $("source").src = job.source;
+  $("clips").replaceChildren();
+  job.clips.forEach(clip => {
+    const button = document.createElement("button");
+    button.className = "pick";
+    button.textContent = time(clip.start) + "–" + time(clip.end) + " · " + clip.title;
+    button.onclick = () => pick(clip,button);
+    $("clips").append(button);
+  });
+  $("clips").firstElementChild.click();
+}
+async function importVideo(path, body, type) {
+  const buttons = document.querySelectorAll("form button");
+  buttons.forEach(button => button.disabled = true);
+  $("editor").hidden = true;
+  $("source").pause();
+  $("preview").pause();
+  $("status").textContent = "Opening source…";
+  try {
+    jobId = (await api(path,body,type)).id;
+    while (true) {
+      job = await api("/jobs/" + jobId);
+      if (job.status === "error") throw Error(job.error);
+      if (job.status === "ready") break;
+      $("status").textContent = job.status + "…";
+      await delay();
+    }
+    $("status").textContent = job.clips.length + " suggested clips";
+    $("exportStatus").textContent = "";
+    $("download").hidden = $("preview").hidden = true;
+    showJob();
+  } catch (error) {
+    $("status").textContent = error.message;
+  } finally {
+    buttons.forEach(button => button.disabled = false);
+  }
+}
+$("link").onsubmit = event => {
+  event.preventDefault();
+  importVideo("/import",{url:new FormData(event.target).get("url")});
+};
+$("upload").onsubmit = event => {
+  event.preventDefault();
+  importVideo("/upload",event.target.elements.video.files[0],"application/octet-stream");
+};
+$("start").onchange = $("end").onchange = showCues;
+$("play").onclick = async () => {
+  try {
+    const {start,end} = bounds();
+    playEnd = end;
+    $("source").currentTime = start;
+    await $("source").play();
+  } catch (error) {
+    $("exportStatus").textContent = error.message;
+  }
+};
+$("source").ontimeupdate = () => {
+  if (playEnd !== null && $("source").currentTime >= playEnd) {
+    $("source").pause();
+    playEnd = null;
+  }
+};
+$("export").onclick = async () => {
+  const activeJob = jobId;
+  $("export").disabled = true;
+  try {
+    const {start,end} = bounds();
+    $("download").hidden = $("preview").hidden = true;
+    $("exportStatus").textContent = "Rendering…";
+    const captions = activeCues().map(cue => ({...cue,text:edits.get(cue.index) ?? cue.text}));
+    const endpoint = "/jobs/" + activeJob;
+    const {id} = await api(endpoint + "/export",{start,end,captions,layout:$("layout").value});
+    while (jobId === activeJob) {
+      const {exports} = await api(endpoint);
+      if (jobId !== activeJob) break;
+      const output = exports[id];
+      if (output.status === "error") throw Error(output.error);
+      if (output.status === "ready") {
+        $("exportStatus").textContent = "Export ready";
+        $("preview").src = output.url;
+        $("download").href = output.url + "?download=1";
+        $("download").hidden = $("preview").hidden = false;
+        break;
+      }
+      await delay();
+    }
+  } catch (error) {
+    if (jobId === activeJob) $("exportStatus").textContent = error.message;
+  } finally {
+    $("export").disabled = false;
+  }
+};
+</script>
