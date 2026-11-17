@@ -163,7 +163,54 @@ def stamp(seconds):
     return f"{hours:02}:{minutes:02}:{milliseconds // 1000:02},{milliseconds % 1000:03}"
 
 
-def render(job_id, export_id, start, end, layout, captions):
+def ass_stamp(seconds):
+    hours, remainder = divmod(round(seconds * 100), 360000)
+    minutes, remainder = divmod(remainder, 6000)
+    secs, centis = divmod(remainder, 100)
+    return f"{hours}:{minutes:02}:{secs:02}.{centis:02}"
+
+
+def animated_captions(captions, start, end):
+    header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Pop,Arial,70,&H00FFFFFF,&H0000DFFF,&H00101010,&H70000000,-1,0,0,0,100,100,0,0,1,6,3,2,110,110,350,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    events = []
+    for cue in captions:
+        words = cue["text"].translate(str.maketrans({"\\": "＼", "{": "｛", "}": "｝"})).split()
+        if not words:
+            continue
+        duration = cue["end"] - cue["start"]
+        for index in range(0, len(words), 4):
+            phrase = words[index:index + 4]
+            first = cue["start"] + duration * index / len(words)
+            last = cue["start"] + duration * (index + len(phrase)) / len(words)
+            visible_start, visible_end = max(start, first), min(end, last)
+            if visible_end - visible_start < 0.02:
+                continue
+            milliseconds = round((visible_end - visible_start) * 1000)
+            rise = min(90, milliseconds // 3)
+            settle = min(180, 2 * milliseconds // 3)
+            animation = rf"{{\fscx86\fscy86\t(0,{rise},\fscx108\fscy108)\t({rise},{settle},\fscx100\fscy100)}}"
+            phrase[-1] = r"{\c&H00DFFF&}" + phrase[-1]
+            events.append(
+                f"Dialogue: 0,{ass_stamp(visible_start-start)},{ass_stamp(visible_end-start)},"
+                f"Pop,,0,0,0,,{animation}{' '.join(phrase)}"
+            )
+    return header + "\n".join(events) + "\n"
+
+
+def render(job_id, export_id, start, end, layout, captions, caption_style="classic"):
     folder = DATA / job_id
     with LOCK:
         job = JOBS[job_id]
@@ -205,7 +252,11 @@ def render(job_id, export_id, start, end, layout, captions):
             line = " ".join(caption["text"].split()).replace("<", "‹").replace(">", "›")
             if line and cue_end - cue_start >= 0.01:
                 cues.append(f"{len(cues) + 1}\n{stamp(cue_start-start)} --> {stamp(cue_end-start)}\n{line}")
-        if cues:
+        if cues and caption_style == "pop":
+            subtitle = f"{export_id}.ass"
+            (folder / subtitle).write_text(animated_captions(captions, start, end), encoding="utf-8")
+            video_filter += f",subtitles={subtitle}"
+        elif cues:
             subtitle = f"{export_id}.srt"
             (folder / subtitle).write_text("\n\n".join(cues) + "\n", encoding="utf-8")
             video_filter += f",subtitles={subtitle}:force_style='FontSize=14,Outline=2,MarginV=36'"
@@ -360,6 +411,9 @@ class Handler(BaseHTTPRequestHandler):
                 layout = request["layout"]
                 if layout not in {"crop", "pad", "reel", "reel-zoom"} or not math.isfinite(start) or not math.isfinite(end):
                     raise ValueError("Check the trim points and framing.")
+                caption_style = request.get("caption_style", "classic")
+                if caption_style not in {"classic", "pop"}:
+                    raise ValueError("Choose a supported caption style.")
                 captions = []
                 for cue in request["captions"]:
                     cue_start, cue_end = float(cue["start"]), float(cue["end"])
@@ -374,7 +428,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("Choose a clip between 1 and 90 seconds within the source.")
                     export_id = uuid.uuid4().hex
                     job["exports"][export_id] = {"status": "Queued or rendering"}
-                WORKER.submit(render, match[1], export_id, start, end, layout, captions)
+                WORKER.submit(render, match[1], export_id, start, end, layout, captions, caption_style)
                 self.reply({"id": export_id}, 202)
                 return
             self.reply({"error": "Unknown action."}, 404)

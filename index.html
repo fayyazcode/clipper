@@ -49,6 +49,7 @@ input[type=number]{width:105px}textarea{width:100%;resize:vertical}a{color:#e0ce
 <details open><summary>Caption text</summary><div id="captions"></div></details>
 <div class="row">
   <label>Vertical framing<select id="layout"><option value="reel">Reel · full frame + blur</option><option value="reel-zoom">Reel · slight zoom + blur</option><option value="pad">Fit entire frame</option><option value="crop">Center crop</option></select></label>
+  <label>Caption style<select id="captionStyle"><option value="pop">Animated · Pop</option><option value="classic">Classic</option></select></label>
   <button id="export">Export 1080 × 1920</button>
 </div>
 <p role="status" id="exportStatus"></p>
@@ -177,7 +178,7 @@ $("export").onclick = async () => {
     $("exportStatus").textContent = "Rendering…";
     const captions = activeCues().map(cue => ({...cue,text:edits.get(cue.index) ?? cue.text}));
     const endpoint = "/jobs/" + activeJob;
-    const {id} = await api(endpoint + "/export",{start,end,captions,layout:$("layout").value});
+    const {id} = await api(endpoint + "/export",{start,end,captions,layout:$("layout").value,caption_style:$("captionStyle").value});
     while (jobId === activeJob) {
       const {exports} = await api(endpoint);
       if (jobId !== activeJob) break;
