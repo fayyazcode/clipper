@@ -210,7 +210,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return header + "\n".join(events) + "\n"
 
 
-def render(job_id, export_id, start, end, layout, captions, caption_style="classic"):
+EXPORT_QUALITY = {
+    "compact": (720, 1280, "veryfast", "23"),
+    "standard": (1080, 1920, "veryfast", "18"),
+    "high": (1080, 1920, "medium", "15"),
+}
+
+
+def render(job_id, export_id, start, end, layout, captions,
+           caption_style="classic", quality="standard"):
     folder = DATA / job_id
     with LOCK:
         job = JOBS[job_id]
@@ -226,25 +234,26 @@ def render(job_id, export_id, start, end, layout, captions, caption_style="class
                 download_youtube(link, folder, preview=False)
         with LOCK:
             export.update(status="Rendering")
+        width, height, preset, crf = EXPORT_QUALITY[quality]
         if layout in {"reel", "reel-zoom"}:
-            foreground = "scale=1080:1920:force_original_aspect_ratio=decrease:force_divisible_by=2"
+            foreground = f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2"
             if layout == "reel-zoom":
                 foreground += (
                     ",scale=w='2*trunc(iw*1.15/2)':h='2*trunc(ih*1.15/2)'"
-                    ",crop=w='min(iw,1080)':h='min(ih,1920)'"
+                    f",crop=w='min(iw,{width})':h='min(ih,{height})'"
                 )
             video_filter = (
                 "split[background][foreground];"
                 "[background]scale=180:320:force_original_aspect_ratio=increase,"
                 "crop=180:320,gblur=sigma=12,eq=brightness=-0.17,"
-                "scale=1080:1920,setsar=1[blurred];"
+                f"scale={width}:{height},setsar=1[blurred];"
                 f"[foreground]{foreground},setsar=1[sharp];"
                 "[blurred][sharp]overlay=(W-w)/2:(H-h)/2"
             )
         elif layout == "crop":
-            video_filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
+            video_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
         else:
-            video_filter = "scale=1080:1920:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1080:1920:(ow-iw)/2:(oh-ih)/2"
+            video_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
         video_filter += ",setsar=1"
         cues = []
         for caption in captions:
@@ -267,7 +276,7 @@ def render(job_id, export_id, start, end, layout, captions, caption_style="class
             video_args = ["-vf", video_filter, "-map", "0:v:0"]
         run(["ffmpeg", "-nostdin", "-v", "error", "-ss", str(start), "-i", source,
              "-t", str(end-start), *video_args, "-map", "0:a:0",
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+             "-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", output], folder)
         with LOCK:
             export.update(status="ready", url=f"/media/{job_id}/{output}")
@@ -411,6 +420,9 @@ class Handler(BaseHTTPRequestHandler):
                 layout = request["layout"]
                 if layout not in {"crop", "pad", "reel", "reel-zoom"} or not math.isfinite(start) or not math.isfinite(end):
                     raise ValueError("Check the trim points and framing.")
+                quality = request.get("quality", "standard")
+                if not isinstance(quality, str) or quality not in EXPORT_QUALITY:
+                    raise ValueError("Choose a supported export quality.")
                 caption_style = request.get("caption_style", "classic")
                 if caption_style not in {"classic", "pop"}:
                     raise ValueError("Choose a supported caption style.")
@@ -428,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("Choose a clip between 1 and 90 seconds within the source.")
                     export_id = uuid.uuid4().hex
                     job["exports"][export_id] = {"status": "Queued or rendering"}
-                WORKER.submit(render, match[1], export_id, start, end, layout, captions, caption_style)
+                WORKER.submit(render, match[1], export_id, start, end, layout, captions, caption_style, quality)
                 self.reply({"id": export_id}, 202)
                 return
             self.reply({"error": "Unknown action."}, 404)
