@@ -179,7 +179,22 @@ def render(job_id, export_id, start, end, layout, captions):
                 download_youtube(link, folder, preview=False)
         with LOCK:
             export.update(status="Rendering")
-        if layout == "crop":
+        if layout in {"reel", "reel-zoom"}:
+            foreground = "scale=1080:1920:force_original_aspect_ratio=decrease:force_divisible_by=2"
+            if layout == "reel-zoom":
+                foreground += (
+                    ",scale=w='2*trunc(iw*1.15/2)':h='2*trunc(ih*1.15/2)'"
+                    ",crop=w='min(iw,1080)':h='min(ih,1920)'"
+                )
+            video_filter = (
+                "split[background][foreground];"
+                "[background]scale=180:320:force_original_aspect_ratio=increase,"
+                "crop=180:320,gblur=sigma=12,eq=brightness=-0.17,"
+                "scale=1080:1920,setsar=1[blurred];"
+                f"[foreground]{foreground},setsar=1[sharp];"
+                "[blurred][sharp]overlay=(W-w)/2:(H-h)/2"
+            )
+        elif layout == "crop":
             video_filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
         else:
             video_filter = "scale=1080:1920:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1080:1920:(ow-iw)/2:(oh-ih)/2"
@@ -195,8 +210,12 @@ def render(job_id, export_id, start, end, layout, captions):
             (folder / subtitle).write_text("\n\n".join(cues) + "\n", encoding="utf-8")
             video_filter += f",subtitles={subtitle}:force_style='FontSize=14,Outline=2,MarginV=36'"
         output = export_id + ".mp4"
+        if layout in {"reel", "reel-zoom"}:
+            video_args = ["-filter_complex", f"[0:v:0]{video_filter}[video]", "-map", "[video]"]
+        else:
+            video_args = ["-vf", video_filter, "-map", "0:v:0"]
         run(["ffmpeg", "-nostdin", "-v", "error", "-ss", str(start), "-i", source,
-             "-t", str(end-start), "-vf", video_filter, "-map", "0:v:0", "-map", "0:a:0",
+             "-t", str(end-start), *video_args, "-map", "0:a:0",
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", output], folder)
         with LOCK:
@@ -339,7 +358,7 @@ class Handler(BaseHTTPRequestHandler):
                 request = self.read_json(length)
                 start, end = float(request["start"]), float(request["end"])
                 layout = request["layout"]
-                if layout not in {"crop", "pad"} or not math.isfinite(start) or not math.isfinite(end):
+                if layout not in {"crop", "pad", "reel", "reel-zoom"} or not math.isfinite(start) or not math.isfinite(end):
                     raise ValueError("Check the trim points and framing.")
                 captions = []
                 for cue in request["captions"]:
